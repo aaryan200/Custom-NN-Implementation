@@ -1,2 +1,5 @@
 # Remove all __pycache__ directories
 **/__pycache__/
+
+# Remove .ipynb_checkpoints directories
+**/.ipynb_checkpoints/

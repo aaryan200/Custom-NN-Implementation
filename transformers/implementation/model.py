@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import math
 
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
 class InputEmbeddings(nn.Module):
 
     def __init__(self, d_model: int, vocab_size: int):
@@ -66,11 +68,12 @@ class LayerNormalization(nn.Module):
 
     def __init__(self, eps: float = 10**-6) -> None:
         super().__init__()
+        
         self.eps = eps
         # Make learnable parameters alpha and beta
         # alpha for multiplication and beta for addition
-        self.alpha = nn.Parameter(torch.ones(1))
-        self.beta = nn.Parameter(torch.ones(1))
+        self.alpha = nn.Parameter(torch.ones(1)).to(device)
+        self.beta = nn.Parameter(torch.ones(1)).to(device)
 
     def forward(self, x):
         # If x is of shape (a, b, c) then the last dimension is the row
@@ -88,9 +91,9 @@ class FeedForwardBlock(nn.Module):
     def __init__(self, d_model: int, d_ff: int, dropout: float) -> None:
         super().__init__()
         # FeedForward(x) = max(0, x*W1 + b1)*W2 + b2
-        self.linear_1 = nn.Linear(d_model, d_ff) # W1 and B1
-        self.dropout = nn.Dropout(dropout)
-        self.linear_2 = nn.Linear(d_ff, d_model) # W2 and B2
+        self.linear_1 = nn.Linear(d_model, d_ff).to(device) # W1 and B1
+        self.dropout = nn.Dropout(dropout).to(device)
+        self.linear_2 = nn.Linear(d_ff, d_model).to(device) # W2 and B2
 
     def forward(self, x):
         # x will be of shape (batch_size, seq_len, d_model)
@@ -116,11 +119,11 @@ class MultiHeadAttentionBlock(nn.Module):
 
         self.d_k = d_model // h
 
-        self.w_q = nn.Linear(d_model, d_model)
-        self.w_k = nn.Linear(d_model, d_model)
-        self.w_v = nn.Linear(d_model, d_model)
+        self.w_q = nn.Linear(d_model, d_model).to(device)
+        self.w_k = nn.Linear(d_model, d_model).to(device)
+        self.w_v = nn.Linear(d_model, d_model).to(device)
 
-        self.w_o = nn.Linear(d_model, d_model)
+        self.w_o = nn.Linear(d_model, d_model).to(device)
         self.dropout = nn.Dropout(dropout)
 
     """

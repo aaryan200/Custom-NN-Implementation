@@ -9,15 +9,113 @@ from tokenizers.models import WordLevel
 from tokenizers.trainers import WordLevelTrainer
 from tokenizers.pre_tokenizers import Whitespace
 
+from model import Transformer
+
 from config import get_weights_file_path, get_config
 
 from torch.utils.tensorboard import SummaryWriter
 
-from dataset import BilingualDataest
+from dataset import BilingualDataest, causal_mask
 from model import build_transformer
 
 from pathlib import Path
 import warnings
+
+def write_val_log(msg, val_log_file):
+    # Append the log
+    with open(val_log_file, 'a') as f:
+        f.write(msg + '\n')
+
+def greedy_decode(model, source, source_mask, tokenizer_src, tokenizer_tgt, max_len, device):
+    sos_idx = tokenizer_tgt.token_to_id('[SOS]')
+    eos_idx = tokenizer_tgt.token_to_id('[EOS]')
+
+    # Precompute the encoder output and reuse it for every token we get from the decoder
+    encoder_output = model.encode(source, source_mask)
+    # Initialize the decoder input with the SOS token
+    decoder_input = torch.empty(1, 1).fill_(sos_idx).type_as(source).to(device) # type_as sets the dtype of the tensor to the dtype of the source tensor
+
+    # decoder_input is of shape (batch_size, )
+
+    while True:
+        if decoder_input.shape[1] == max_len:
+            break
+
+        # Build mask for the target (decoder input)
+        decoder_mask = causal_mask(decoder_input.size(1)).type_as(source_mask).to(device)
+
+        # Calculate the output of the decoder
+        out = model.decode(encoder_output, source_mask, decoder_input, decoder_mask)
+
+        # Get the next token, find the projection of the last token
+        prob = model.project(out[:, -1])
+        # Select the token with maximum probability (greedy search)
+        _, next_word = torch.max(prob, dim = 1)
+
+        decoder_input = torch.cat([decoder_input, torch.empty(1, 1).type_as(source).fill_(next_word.item()).to(device)], dim = 1)
+
+        if next_word == eos_idx:
+            break
+    return decoder_input.squeeze(0)
+
+
+def run_validation(model: Transformer, validation_ds, tokenizer_src, tokenizer_tgt, max_len, device, print_msg, global_state, writer, num_examples = 2):
+    model.eval()
+    count = 0
+
+    # source_texts = []
+    # expected = []
+    # predicted = []
+
+    # Size of the control window
+    console_width = 10
+
+    with torch.no_grad():
+        for batch in validation_ds:
+            count += 1
+            encoder_input = batch['encoder_input'].to(device)
+            encoder_mask = batch['encoder_mask'].to(device)
+
+            assert encoder_input.shape[0] == 1, "Batch size should be 1 for validation"
+
+            model_out = greedy_decode(model, encoder_input, encoder_mask, tokenizer_src, tokenizer_tgt, max_len, device)
+
+            src_text = batch['src_text'][0]
+            tgt_text = batch['tgt_text'][0]
+            # source_texts.append(src_text)
+            # expected.append(tgt_text)
+            model_out_text = tokenizer_tgt.decode(model_out.detach().cpu().numpy())
+            # detach creates a tensor that shares storage with model_out but does not require gradient computation. In other words, it detaches the output tensor from the computation graph
+            # predicted.append(model_out_text)
+
+            # Print to console
+            print_msg('='*console_width)
+            print_msg(f'SOURCE: {src_text}')
+            print_msg(f'TARGET: {tgt_text}')
+            print_msg(f'PREDICTED: {model_out_text}')
+
+            if count == num_examples:
+                break
+
+    # if writer:
+    #     # Evaluate the character error rate
+    #     # Compute the char error rate 
+    #     metric = torchmetrics.CharErrorRate()
+    #     cer = metric(predicted, expected)
+    #     writer.add_scalar('validation cer', cer, global_step)
+    #     writer.flush()
+
+    #     # Compute the word error rate
+    #     metric = torchmetrics.WordErrorRate()
+    #     wer = metric(predicted, expected)
+    #     writer.add_scalar('validation wer', wer, global_step)
+    #     writer.flush()
+
+    #     # Compute the BLEU metric
+    #     metric = torchmetrics.BLEUScore()
+    #     bleu = metric(predicted, expected)
+    #     writer.add_scalar('validation BLEU', bleu, global_step)
+    #     writer.flush()
 
 def get_all_sentences(ds, lang):
     for item in ds:
@@ -46,7 +144,7 @@ def get_or_build_tokenizer(config, ds, lang):
 def get_ds(config):
     ds_raw = load_dataset('cfilt/iitb-english-hindi', split='train')
 
-    # Keep 30k examples for training and 1k examples for validation
+    # Keep 15k examples for training and 1k examples for validation
     num_examples = 31_000
     ds_raw = ds_raw.select(range(num_examples))
 
@@ -123,8 +221,9 @@ def train_model(config):
     # This makes model less confident about the predictions and reduces overfitting
 
     for epoch in range(initial_epoch, config['num_epochs']):
+        torch.cuda.empty_cache()
         model.train()
-        batch_iterator = tqdm(train_dataloader, desc = f'Processing epoch {epoch:02d}') # :02d means that the number should be printed with atleast 2 digits and if the number is less than 2 digits, then pad it with 0 in the beginning
+        batch_iterator = tqdm(train_dataloader, desc = f'Processing Epoch {epoch:02d}') # :02d means that the number should be printed with atleast 2 digits and if the number is less than 2 digits, then pad it with 0 in the beginning
 
         for batch in batch_iterator:
             encoder_input = batch['encoder_input'].to(device) # (batch_size, seq_len)
@@ -156,9 +255,20 @@ def train_model(config):
 
             # Update the weights
             optimizer.step()
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
+
+            # run_validation(model, val_dataloader, tokenizer_src, tokenizer_tgt, config['seq_len'], device, lambda msg: batch_iterator.write(msg), global_step, writer, num_examples = 2)
 
             global_step += 1
+
+            if global_step % config['val_log_interval'] == 0:
+                run_validation(model, val_dataloader, tokenizer_src, tokenizer_tgt, config['seq_len'], device, lambda msg: write_val_log(msg, config['val_log_file']), global_step, writer, num_examples = 2)
+                # Set the model back to training mode
+                model.train()
+
+        write_val_log(f'Epoch {epoch:02d} completed', config['val_log_file'])
+        run_validation(model, val_dataloader, tokenizer_src, tokenizer_tgt, config['seq_len'], device, lambda msg: write_val_log(msg, config['val_log_file']), global_step, writer, num_examples = 2)
+
 
         # Save the model at the end of every epoch
         model_filename = get_weights_file_path(config, f'{epoch:02d}')

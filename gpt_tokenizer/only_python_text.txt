@@ -1,0 +1,2913 @@
+class Block:
+    """
+    A block is a node in the layout tree. It can be a paragraph, a list item, a table, or a section header. 
+    This is the base class for all blocks such as Paragraph, ListItem, Table, Section.
+
+    Attributes
+    ----------
+    tag: str
+        tag of the block e.g. para, list_item, table, header
+    level: int
+        level of the block in the layout tree
+    page_idx: int
+        page index of the block in the document. It starts from 0 and is -1 if the page number is not available
+    block_idx: int
+        id of the block as returned from the server. It starts from 0 and is -1 if the id is not available
+    top: float
+        top position of the block in the page and it is -1 if the position is not available - only available for tables
+    left: float
+        left position of the block in the page and it is -1 if the position is not available - only available for tables
+    bbox: [float]
+        bounding box of the block in the page and it is [] if the bounding box is not available
+    sentences: list
+        list of sentences in the block
+    children: list
+        list of immediate child blocks, but not the children of the children
+    parent: Block
+        parent of the block
+    block_json: dict
+        json returned by the parser API for the block
+    """
+    tag: str
+    def __init__(self, block_json=None):
+        self.tag = block_json['tag'] if block_json and 'tag' in block_json else None
+        self.level = block_json['level'] if block_json and 'level' in block_json else -1
+        self.page_idx = block_json['page_idx'] if block_json and 'page_idx' in block_json else -1
+        self.block_idx = block_json['block_idx'] if block_json and 'block_idx' in block_json else -1
+        self.top = block_json['top'] if block_json and 'top' in block_json else -1
+        self.left = block_json['left'] if block_json and 'left' in block_json else -1
+        self.bbox = block_json['bbox'] if block_json and 'bbox' in block_json else []
+        self.sentences = block_json['sentences'] if block_json and 'sentences' in block_json else []
+        self.children = []
+        self.parent = None
+        self.block_json = block_json
+
+    def add_child(self, node):
+        """
+        Adds a child to the block. Sets the parent of the child to self.
+        """
+        self.children.append(node)
+        node.parent = self
+
+    def to_html(self, include_children=False, recurse=False):
+        """
+        Converts the block to html. This is a virtual method and should be implemented by the derived classes.
+        """
+        pass
+
+    def to_text(self, include_children=False, recurse=False):
+        """
+        Converts the block to text. This is a virtual method and should be implemented by the derived classes.
+        """
+        pass
+
+    def parent_chain(self):
+        """
+        Returns the parent chain of the block consisting of all the parents of the block until the root.
+        """
+        chain = []
+        parent = self.parent
+        while parent:
+            chain.append(parent)
+            parent = parent.parent
+        chain.reverse()
+        return chain
+
+    def parent_text(self):
+        """
+        Returns the text of the parent chain of the block. This is useful for adding section information to the text.
+        """
+        parent_chain = self.parent_chain()
+        header_texts = []
+        para_texts = []
+        for p in parent_chain:
+            if p.tag == "header":
+                header_texts.append(p.to_text()) 
+            elif p.tag in ['list_item', 'para']:
+                para_texts.append(p.to_text())
+        text = " > ".join(header_texts)
+        if len(para_texts) > 0:
+            text +="\n".join(para_texts)
+        return text                
+
+    def to_context_text(self, include_section_info=True):
+        """
+        Returns the text of the block with section information. This provides context to the text.
+        """
+        text = ""
+        if include_section_info:
+            text += self.parent_text() + "\n"
+        if self.tag in ['list_item', 'para', 'table']:
+            text += self.to_text(include_children=True, recurse=True)
+        else:
+            text += self.to_text()
+        return text
+    
+    def iter_children(self, node, level, node_visitor):
+        """
+        Iterates over all the children of the node and calls the node_visitor function on each child.
+        """
+        for child in node.children:
+            node_visitor(child)
+            # print("-"*level, child.tag, f"({len(child.children)})", child.to_text())
+            if child.tag not in ['list_item', 'para', 'table']:
+                self.iter_children(child, level + 1, node_visitor)
+
+    def paragraphs(self):
+        """
+        Returns all the paragraphs in the block. This is useful for getting all the paragraphs in a section.
+        """
+        paragraphs = []
+        def para_collector(node):
+            if node.tag == 'para':
+                paragraphs.append(node)
+        self.iter_children(self, 0, para_collector)
+        return paragraphs
+       
+    def chunks(self):
+        """
+        Returns all the chunks in the block. Chunking automatically splits the document into paragraphs, lists, and tables without any prior knowledge of the document structure.
+        """
+        chunks = []
+        def chunk_collector(node):
+            if node.tag in ['para', 'list_item', 'table']:
+                chunks.append(node)
+        self.iter_children(self, 0, chunk_collector)
+        return chunks
+    
+    def tables(self):
+        """
+        Returns all the tables in the block. This is useful for getting all the tables in a section.
+        """
+        tables = []
+        def chunk_collector(node):
+            if node.tag in ['table']:
+                tables.append(node)
+        self.iter_children(self, 0, chunk_collector)        
+        return tables
+
+    def sections(self):
+        """
+        Returns all the sections in the block. This is useful for getting all the sections in a document.
+        """
+        sections = []
+        def chunk_collector(node):
+            if node.tag in ['header']:
+                sections.append(node)
+        self.iter_children(self, 0, chunk_collector)
+        return sections
+
+class Paragraph(Block):
+    """
+    A paragraph is a block of text. It can have children such as lists. A paragraph has tag 'para'.
+    """
+    def __init__(self, para_json):
+        super().__init__(para_json)
+    def to_text(self, include_children=False, recurse=False):
+        """
+        Converts the paragraph to text. If include_children is True, then the text of the children is also included. If recurse is True, then the text of the children's children are also included.
+        
+        Parameters
+        ----------
+        include_children: bool
+            If True, then the text of the children are also included
+        recurse: bool
+            If True, then the text of the children's children are also included
+        """
+        para_text = "\n".join(self.sentences)
+        if include_children:
+            for child in self.children:
+                para_text += "\n" + child.to_text(include_children=recurse, recurse=recurse)
+        return para_text    
+    def to_html(self, include_children=False, recurse=False):
+        """
+        Converts the paragraph to html. If include_children is True, then the html of the children is also included. If recurse is True, then the html of the children's children are also included.
+
+        Parameters
+        ----------
+        include_children: bool
+            If True, then the html of the children are also included
+        recurse: bool
+            If True, then the html of the children's children are also included
+        """
+        html_str = "<p>"
+        html_str = html_str + "\n".join(self.sentences)
+        if include_children:
+            if len(self.children) > 0:
+                html_str += "<ul>"
+                for child in self.children:
+                    html_str = html_str + child.to_html(include_children=recurse, recurse=recurse)
+                html_str += "</ul>"
+        html_str = html_str + "</p>"
+        return html_str
+    
+class Section(Block):
+    """
+    A section is a block of text. It can have children such as paragraphs, lists, and tables. A section has tag 'header'.
+
+    Attributes
+    ----------
+    title: str
+        title of the section
+    """
+    def __init__(self, section_json):
+        super().__init__(section_json)
+        self.title = "\n".join(self.sentences)
+    def to_text(self, include_children=False, recurse=False):
+        """
+        Converts the section to text. If include_children is True, then the text of the children is also included. If recurse is True, then the text of the children's children are also included.
+
+        Parameters
+        ----------
+        include_children: bool
+            If True, then the text of the children are also included
+        recurse: bool
+            If True, then the text of the children's children are also included
+        """
+        text = self.title
+        if include_children:
+            for child in self.children:
+                text += "\n" + child.to_text(include_children=recurse, recurse=recurse)
+        return text    
+
+    def to_html(self, include_children=False, recurse=False):
+        """
+        Converts the section to html. If include_children is True, then the html of the children is also included. If recurse is True, then the html of the children's children are also included.
+
+        Parameters
+        ----------
+        include_children: bool
+            If True, then the html of the children are also included
+        recurse: bool
+            If True, then the html of the children's children are also included
+        """
+        html_str = f"<h{self.level + 1}>"
+        html_str = html_str + self.title
+        html_str = html_str + f"</h{self.level + 1}>"
+        if include_children:
+            for child in self.children:
+                html_str += child.to_html(include_children=recurse, recurse=recurse)
+        return html_str
+
+class ListItem(Block):
+    """
+    A list item is a block of text. It can have child list items. A list item has tag 'list_item'.
+    """
+    def __init__(self, list_json):
+        super().__init__(list_json)
+
+    def to_text(self, include_children=False, recurse=False):
+        """
+        Converts the list item to text. If include_children is True, then the text of the children is also included. If recurse is True, then the text of the children's children are also included.
+        
+        Parameters
+        ----------
+        include_children: bool
+            If True, then the text of the children are also included
+        recurse: bool
+            If True, then the text of the children's children are also included
+        """
+        text = "\n".join(self.sentences)
+        if include_children:
+            for child in self.children:
+                text += "\n" + child.to_text(include_children=recurse, recurse=recurse)
+        return text    
+
+    def to_html(self, include_children=False, recurse=False):
+        """
+        Converts the list item to html. If include_children is True, then the html of the children is also included. If recurse is True, then the html of the children's children are also included.
+        
+        Parameters
+        ----------
+        include_children: bool
+            If True, then the html of the children are also included
+        recurse: bool
+            If True, then the html of the children's children are also included
+        """
+        html_str = f"<li>"
+        html_str = html_str + "\n".join(self.sentences)
+        if include_children:
+            if len(self.children) > 0:
+                html_str += "<ul>"
+                for child in self.children:
+                    html_str = html_str + child.to_html(include_children=recurse, recurse=recurse)
+                html_str += "</ul>"        
+        html_str = html_str + f"</li>"
+        return html_str
+
+    
+class TableCell(Block):
+    """
+    A table cell is a block of text. It can have child paragraphs. A table cell has tag 'table_cell'.
+    A table cell is contained within table rows.
+    """
+    def __init__(self, cell_json):
+        super().__init__(cell_json)
+        self.col_span = cell_json['col_span'] if 'col_span' in cell_json else 1
+        self.cell_value = cell_json['cell_value']
+        if not isinstance(self.cell_value, str):
+            self.cell_node = Paragraph(self.cell_value)
+        else:
+            self.cell_node = None
+    def to_text(self):
+        """
+        Returns the cell value of the text. If the cell value is a paragraph node, then the text of the node is returned.
+        """
+        cell_text = self.cell_value
+        if self.cell_node:
+            cell_text = self.cell_node.to_text()
+        return cell_text
+    def to_html(self):
+        """
+        Returns the cell value ashtml. If the cell value is a paragraph node, then the html of the node is returned.
+        """
+        cell_html = self.cell_value
+        if self.cell_node:
+            cell_html = self.cell_node.to_html()
+        if self.col_span == 1:
+            html_str = f"<td colSpan={self.col_span}>{cell_html}</td>"
+        else:
+            html_str = f"<td>{cell_html}</td>"
+        return html_str
+            
+class TableRow(Block):
+    """
+    A table row is a block of text. It can have child table cells.
+    """
+    def __init__(self, row_json):
+        self.cells = []
+        if row_json['type'] == 'full_row':
+            cell = TableCell(row_json)
+            self.cells.append(cell)
+        else:
+            for cell_json in row_json['cells']:
+                cell = TableCell(cell_json)
+                self.cells.append(cell)
+    def to_text(self, include_children=False, recurse=False):
+        """
+        Returns text of a row with text from all the cells in the row delimited by '|'
+        """
+        cell_text = ""
+        for cell in self.cells:
+            cell_text = cell_text + " | " + cell.to_text()
+        return cell_text
+    def to_html(self, include_children=False, recurse=False):
+        """
+        Returns html for a <tr> with html from all the cells in the row as <td>
+        """
+        html_str = "<tr>"
+        for cell in self.cells:
+            html_str = html_str + cell.to_html()
+        html_str = html_str + "</tr>"
+        return html_str
+
+class TableHeader(Block):
+    """
+    A table header is a block of text. It can have child table cells.
+    """
+    def __init__(self, row_json):
+        super().__init__(row_json)
+        self.cells = []
+        for cell_json in row_json['cells']:
+            cell = TableCell(cell_json)
+            self.cells.append(cell)
+    def to_text(self, include_children=False, recurse=False):
+        """
+        Returns text of a row with text from all the cells in the row delimited by '|' and the header row is delimited by '---'
+        Text is returned in markdown format.
+        """
+        cell_text = ""
+        for cell in self.cells:
+            cell_text = cell_text + " | " + cell.to_text()
+        cell_text += "\n"
+        for cell in self.cells:
+            cell_text = cell_text + " | " + "---"           
+        return cell_text
+    def to_html(self, include_children=False, recurse=False):
+        """
+        Returns html for a <th> with html from all the cells in the row as <td>
+        """
+        html_str = "<th>"
+        for cell in self.cells:
+            html_str = html_str + cell.to_html()
+        html_str = html_str + "</th>"
+        return html_str
+        
+class Table(Block):
+    """
+    A table is a block of text. It can have child table rows. A table has tag 'table'.
+    """
+    def __init__(self, table_json, parent):
+        # self.title = parent.name
+        super().__init__(table_json)
+        self.rows = []
+        self.headers = []
+        self.name = table_json["name"]
+        if 'table_rows' in table_json:
+            for row_json in table_json['table_rows']:
+                if row_json['type'] == 'table_header':
+                    row = TableHeader(row_json)
+                    self.headers.append(row)
+                else:
+                    row = TableRow(row_json)
+                    self.rows.append(row)
+    def to_text(self, include_children=False, recurse=False):
+        """
+        Returns text of a table with text from all the rows in the table delimited by '\n'
+        """
+        text = ""
+        for header in self.headers:
+            text = text + header.to_text() + "\n"
+        for row in self.rows:
+            text = text + row.to_text() + "\n"
+        return text
+                   
+    def to_html(self, include_children=False, recurse=False):
+        """
+        Returns html for a <table> with html from all the rows in the table as <tr>
+        """
+        html_str = "<table>"
+        for header in self.headers:
+            html_str = html_str + header.to_html()
+        for row in self.rows:
+            html_str = html_str + row.to_html()
+        html_str = html_str + "</table>"
+        return html_str
+
+class LayoutReader:
+    """
+    Reads the layout tree from the json returned by the parser API.
+    """
+    def debug(self, pdf_root):
+        def iter_children(node, level):
+            for child in node.children:
+                print("-"*level, child.tag, f"({len(child.children)})", child.to_text())
+                iter_children(child, level + 1)
+        iter_children(pdf_root, 0)
+
+    def read(self, blocks_json):
+        """
+        Reads the layout tree from the json returned by the parser API. Constructs a tree of Block objects.
+        """
+        root = Block()
+        parent = None
+        parent_stack = [root]
+        prev_node = root
+        parent = root
+        list_stack = []
+        for block in blocks_json:
+            if block['tag'] != 'list_item' and len(list_stack) > 0:
+                list_stack = []
+            if block['tag'] == 'para':
+                node = Paragraph(block)
+                parent.add_child(node)
+            elif block['tag'] == 'table':
+                node = Table(block, prev_node)
+                parent.add_child(node)
+            elif block['tag'] == 'list_item':
+                node = ListItem(block)
+                # add lists as children to previous paragraph 
+                # this handles examples like - The following items need to be addressed: 1) item 1 2) item 2 etc.
+                if prev_node.tag == 'para' and prev_node.level == node.level:
+                    list_stack.append(prev_node)
+                # sometimes there are lists within lists in legal documents
+                elif prev_node.tag == 'list_item':
+                    if node.level > prev_node.level:
+                        list_stack.append(prev_node)
+                    elif node.level < prev_node.level:
+                        while len(list_stack) > 0 and list_stack.pop().level > node.level:
+                            pass
+                        # list_stack.append(node)
+                if len(list_stack) > 0:
+                    list_stack[-1].add_child(node)
+                else:
+                    parent.add_child(node)
+                    
+            elif block['tag'] == 'header':
+                node = Section(block)
+                if node.level > parent.level:
+                    parent_stack.append(node)
+                    parent.add_child(node)
+                else:
+                    while len(parent_stack) > 1 and parent_stack[-1].level >= node.level:
+                        parent_stack.pop()
+                    parent_stack[-1].add_child(node)            
+                    parent_stack.append(node)
+                parent = node
+            prev_node = node
+
+        return root
+
+class Document:
+    """
+    A document is a tree of blocks. It is the root node of the layout tree.
+    """
+    def __init__(self, blocks_json):
+        self.reader = LayoutReader()
+        self.root_node = self.reader.read(blocks_json)
+        self.json = blocks_json
+        self.top_sections = self._get_top_sections()
+    def chunks(self):
+        """
+        Returns all the chunks in the document. Chunking automatically splits the document into paragraphs, lists, and tables without any prior knowledge of the document structure.
+        """
+        return self.root_node.chunks()
+    def tables(self):
+        """
+        Returns all the tables in the document. This is useful for getting all the tables in a document.
+        """
+        return self.root_node.tables()
+    def sections(self):
+        """
+        Returns all the sections in the document. This is useful for getting all the sections in a document.
+        """
+        return self.root_node.sections()
+    
+    def to_text(self, include_duplicates = False):
+        """
+        Returns text of a document by iterating through all the sections '\n'
+        :param include_duplicates: bool
+            If True, then text of all the sections is included. If False, then only the text of the top sections is included.
+        """
+        text = ""
+
+        if include_duplicates:
+            for section in self.sections():
+                text = text + section.to_text(include_children=True, recurse=True) + "\n"
+        else:
+            for section in self.top_sections:
+                text = text + section.to_text(include_children=True, recurse=True) + "\n"
+
+        return text
+                   
+    def to_html(self, include_duplicates = False):
+        """
+        Returns html for the document by iterating through all the sections
+        :param include_duplicates: bool
+            If True, then html of all the sections is included. If False, then only the html of the top sections is included.
+        """
+        html_str = "<html>"
+
+        if include_duplicates:
+            for section in self.sections():
+                html_str = html_str + section.to_html(include_children=True, recurse=True)
+        else:
+            for section in self.top_sections:
+                html_str = html_str + section.to_html(include_children=True, recurse=True)
+
+        html_str = html_str + "</html>"
+        return html_str
+    
+    def _get_top_sections(self):
+        """
+        Get the top sections of the document. A section is considered a top section if it is not a child of any other section in the document.
+        """
+        top_sections = list()
+        sections = self.sections()
+        sections_len = len(sections)
+
+        # Iterate over all the sections
+        for i in range(sections_len):
+            is_top_section = True   # Assume current section is a top section
+
+            # Check if the current section is a child of any other section
+            for j in range(sections_len):
+                if i != j:
+                    if sections[i] in sections[j].children:
+                        # If current section is a child of any other section, then it is not a top section
+                        is_top_section = False
+                        break
+                    
+            if is_top_section:
+                # Append the top section to the list of top sections
+                top_sections.append(sections[i])
+
+        return top_sections
+
+import asyncio
+from typing import Any, List, Optional, Tuple
+
+from llama_index.core.base.base_retriever import BaseRetriever
+from llama_index.core.base.llms.types import ChatMessage, MessageRole
+from llama_index.core.callbacks import CallbackManager, trace_method
+from llama_index.core.chat_engine.types import (
+    AgentChatResponse,
+    BaseChatEngine,
+    StreamingAgentChatResponse,
+    ToolOutput,
+)
+from llama_index.core.llms.llm import LLM
+from llama_index.core.memory import BaseMemory, ChatMemoryBuffer
+from llama_index.core.postprocessor.types import BaseNodePostprocessor
+from llama_index.core.schema import MetadataMode, NodeWithScore, QueryBundle
+from llama_index.core.service_context import ServiceContext
+from llama_index.core.settings import (
+    Settings,
+    callback_manager_from_settings_or_context,
+    llm_from_settings_or_context,
+)
+from llama_index.core.types import Thread
+
+DEFAULT_CONTEXT_TEMPLATE = (
+    "Context information is below."
+    "\n--------------------\n"
+    "{context_str}"
+    "\n--------------------\n"
+)
+
+
+class ContextChatEngine(BaseChatEngine):
+    """
+    Context Chat Engine.
+
+    Uses a retriever to retrieve a context, set the context in the system prompt,
+    and then uses an LLM to generate a response, for a fluid chat experience.
+    """
+
+    def __init__(
+        self,
+        retriever: BaseRetriever,
+        llm: LLM,
+        memory: BaseMemory,
+        prefix_messages: List[ChatMessage],
+        node_postprocessors: Optional[List[BaseNodePostprocessor]] = None,
+        context_template: Optional[str] = None,
+        callback_manager: Optional[CallbackManager] = None,
+    ) -> None:
+        self._retriever = retriever
+        self._llm = llm
+        self._memory = memory
+        self._prefix_messages = prefix_messages
+        self._node_postprocessors = node_postprocessors or []
+        self._context_template = context_template or DEFAULT_CONTEXT_TEMPLATE
+
+        self.callback_manager = callback_manager or CallbackManager([])
+        for node_postprocessor in self._node_postprocessors:
+            node_postprocessor.callback_manager = self.callback_manager
+
+    @classmethod
+    def from_defaults(
+        cls,
+        retriever: BaseRetriever,
+        service_context: Optional[ServiceContext] = None,
+        chat_history: Optional[List[ChatMessage]] = None,
+        memory: Optional[BaseMemory] = None,
+        system_prompt: Optional[str] = None,
+        prefix_messages: Optional[List[ChatMessage]] = None,
+        node_postprocessors: Optional[List[BaseNodePostprocessor]] = None,
+        context_template: Optional[str] = None,
+        llm: Optional[LLM] = None,
+        **kwargs: Any,
+    ) -> "ContextChatEngine":
+        """Initialize a ContextChatEngine from default parameters."""
+        llm = llm or llm_from_settings_or_context(Settings, service_context)
+
+        chat_history = chat_history or []
+        memory = memory or ChatMemoryBuffer.from_defaults(
+            chat_history=chat_history, token_limit=llm.metadata.context_window - 256
+        )
+
+        if system_prompt is not None:
+            if prefix_messages is not None:
+                raise ValueError(
+                    "Cannot specify both system_prompt and prefix_messages"
+                )
+            prefix_messages = [
+                ChatMessage(content=system_prompt, role=llm.metadata.system_role)
+            ]
+
+        prefix_messages = prefix_messages or []
+        node_postprocessors = node_postprocessors or []
+
+        return cls(
+            retriever,
+            llm=llm,
+            memory=memory,
+            prefix_messages=prefix_messages,
+            node_postprocessors=node_postprocessors,
+            callback_manager=callback_manager_from_settings_or_context(
+                Settings, service_context
+            ),
+            context_template=context_template,
+        )
+
+    def _generate_context(self, message: str) -> Tuple[str, List[NodeWithScore]]:
+        """Generate context information from a message."""
+        nodes = self._retriever.retrieve(message)
+        for postprocessor in self._node_postprocessors:
+            nodes = postprocessor.postprocess_nodes(
+                nodes, query_bundle=QueryBundle(message)
+            )
+
+        context_str = "\n\n".join(
+            [n.node.get_content(metadata_mode=MetadataMode.LLM).strip() for n in nodes]
+        )
+
+        return self._context_template.format(context_str=context_str), nodes
+
+    async def _agenerate_context(self, message: str) -> Tuple[str, List[NodeWithScore]]:
+        """Generate context information from a message."""
+        nodes = await self._retriever.aretrieve(message)
+        for postprocessor in self._node_postprocessors:
+            nodes = postprocessor.postprocess_nodes(
+                nodes, query_bundle=QueryBundle(message)
+            )
+        context_str = "\n\n".join(
+            [n.node.get_content(metadata_mode=MetadataMode.LLM).strip() for n in nodes]
+        )
+
+        return self._context_template.format(context_str=context_str), nodes
+
+    def _get_prefix_messages_with_context(self, context_str: str) -> List[ChatMessage]:
+        """Get the prefix messages with context."""
+        # ensure we grab the user-configured system prompt
+        system_prompt = ""
+        prefix_messages = self._prefix_messages
+        if (
+            len(self._prefix_messages) != 0
+            and self._prefix_messages[0].role == MessageRole.SYSTEM
+        ):
+            system_prompt = str(self._prefix_messages[0].content)
+            prefix_messages = self._prefix_messages[1:]
+
+        context_str_w_sys_prompt = system_prompt.strip() + "\n" + context_str
+        return [
+            ChatMessage(
+                content=context_str_w_sys_prompt, role=self._llm.metadata.system_role
+            ),
+            *prefix_messages,
+        ]
+
+    @trace_method("chat")
+    def chat(
+        self, message: str, chat_history: Optional[List[ChatMessage]] = None
+    ) -> AgentChatResponse:
+        if chat_history is not None:
+            self._memory.set(chat_history)
+        self._memory.put(ChatMessage(content=message, role="user"))
+
+        context_str_template, nodes = self._generate_context(message)
+        prefix_messages = self._get_prefix_messages_with_context(context_str_template)
+        prefix_messages_token_count = len(
+            self._memory.tokenizer_fn(
+                " ".join([(m.content or "") for m in prefix_messages])
+            )
+        )
+        all_messages = prefix_messages + self._memory.get(
+            initial_token_count=prefix_messages_token_count
+        )
+        chat_response = self._llm.chat(all_messages)
+        ai_message = chat_response.message
+        self._memory.put(ai_message)
+
+        return AgentChatResponse(
+            response=str(chat_response.message.content),
+            sources=[
+                ToolOutput(
+                    tool_name="retriever",
+                    content=str(prefix_messages[0]),
+                    raw_input={"message": message},
+                    raw_output=prefix_messages[0],
+                )
+            ],
+            source_nodes=nodes,
+        )
+
+    @trace_method("chat")
+    def stream_chat(
+        self, message: str, chat_history: Optional[List[ChatMessage]] = None
+    ) -> StreamingAgentChatResponse:
+        if chat_history is not None:
+            self._memory.set(chat_history)
+        self._memory.put(ChatMessage(content=message, role="user"))
+
+        context_str_template, nodes = self._generate_context(message)
+        prefix_messages = self._get_prefix_messages_with_context(context_str_template)
+        initial_token_count = len(
+            self._memory.tokenizer_fn(
+                " ".join([(m.content or "") for m in prefix_messages])
+            )
+        )
+        all_messages = prefix_messages + self._memory.get(
+            initial_token_count=initial_token_count
+        )
+
+        chat_response = StreamingAgentChatResponse(
+            chat_stream=self._llm.stream_chat(all_messages),
+            sources=[
+                ToolOutput(
+                    tool_name="retriever",
+                    content=str(prefix_messages[0]),
+                    raw_input={"message": message},
+                    raw_output=prefix_messages[0],
+                )
+            ],
+            source_nodes=nodes,
+        )
+        thread = Thread(
+            target=chat_response.write_response_to_history, args=(self._memory,)
+        )
+        thread.start()
+
+        return chat_response
+
+    @trace_method("chat")
+    async def achat(
+        self, message: str, chat_history: Optional[List[ChatMessage]] = None
+    ) -> AgentChatResponse:
+        if chat_history is not None:
+            self._memory.set(chat_history)
+        self._memory.put(ChatMessage(content=message, role="user"))
+
+        context_str_template, nodes = await self._agenerate_context(message)
+        prefix_messages = self._get_prefix_messages_with_context(context_str_template)
+        initial_token_count = len(
+            self._memory.tokenizer_fn(
+                " ".join([(m.content or "") for m in prefix_messages])
+            )
+        )
+        all_messages = prefix_messages + self._memory.get(
+            initial_token_count=initial_token_count
+        )
+
+        chat_response = await self._llm.achat(all_messages)
+        ai_message = chat_response.message
+        self._memory.put(ai_message)
+
+        return AgentChatResponse(
+            response=str(chat_response.message.content),
+            sources=[
+                ToolOutput(
+                    tool_name="retriever",
+                    content=str(prefix_messages[0]),
+                    raw_input={"message": message},
+                    raw_output=prefix_messages[0],
+                )
+            ],
+            source_nodes=nodes,
+        )
+
+    @trace_method("chat")
+    async def astream_chat(
+        self, message: str, chat_history: Optional[List[ChatMessage]] = None
+    ) -> StreamingAgentChatResponse:
+        if chat_history is not None:
+            self._memory.set(chat_history)
+        self._memory.put(ChatMessage(content=message, role="user"))
+
+        context_str_template, nodes = await self._agenerate_context(message)
+        prefix_messages = self._get_prefix_messages_with_context(context_str_template)
+        initial_token_count = len(
+            self._memory.tokenizer_fn(
+                " ".join([(m.content or "") for m in prefix_messages])
+            )
+        )
+        all_messages = prefix_messages + self._memory.get(
+            initial_token_count=initial_token_count
+        )
+
+        chat_response = StreamingAgentChatResponse(
+            achat_stream=await self._llm.astream_chat(all_messages),
+            sources=[
+                ToolOutput(
+                    tool_name="retriever",
+                    content=str(prefix_messages[0]),
+                    raw_input={"message": message},
+                    raw_output=prefix_messages[0],
+                )
+            ],
+            source_nodes=nodes,
+        )
+        asyncio.create_task(chat_response.awrite_response_to_history(self._memory))
+
+        return chat_response
+
+    def reset(self) -> None:
+        self._memory.reset()
+
+    @property
+    def chat_history(self) -> List[ChatMessage]:
+        """Get chat history."""
+        return self._memory.get_all()
+
+
+"""Base embeddings file."""
+
+import asyncio
+from abc import abstractmethod
+from typing import Coroutine, List, Tuple
+
+from llama_index.core.base.embeddings.base import (
+    BaseEmbedding,
+    Embedding,
+)
+from llama_index.core.callbacks.schema import CBEventType, EventPayload
+from llama_index.core.schema import ImageType
+from llama_index.core.utils import get_tqdm_iterable
+
+
+class MultiModalEmbedding(BaseEmbedding):
+    """Base class for Multi Modal embeddings."""
+
+    @abstractmethod
+    def _get_image_embedding(self, img_file_path: ImageType) -> Embedding:
+        """
+        Embed the input image synchronously.
+
+        Subclasses should implement this method. Reference get_image_embedding's
+        docstring for more information.
+        """
+
+    @abstractmethod
+    async def _aget_image_embedding(self, img_file_path: ImageType) -> Embedding:
+        """
+        Embed the input image asynchronously.
+
+        Subclasses should implement this method. Reference get_image_embedding's
+        docstring for more information.
+        """
+
+    def get_image_embedding(self, img_file_path: ImageType) -> Embedding:
+        """
+        Embed the input image.
+        """
+        with self.callback_manager.event(
+            CBEventType.EMBEDDING, payload={EventPayload.SERIALIZED: self.to_dict()}
+        ) as event:
+            image_embedding = self._get_image_embedding(img_file_path)
+
+            event.on_end(
+                payload={
+                    EventPayload.CHUNKS: [img_file_path],
+                    EventPayload.EMBEDDINGS: [image_embedding],
+                },
+            )
+        return image_embedding
+
+    async def aget_image_embedding(self, img_file_path: ImageType) -> Embedding:
+        """Get image embedding."""
+        with self.callback_manager.event(
+            CBEventType.EMBEDDING, payload={EventPayload.SERIALIZED: self.to_dict()}
+        ) as event:
+            image_embedding = await self._aget_image_embedding(img_file_path)
+
+            event.on_end(
+                payload={
+                    EventPayload.CHUNKS: [img_file_path],
+                    EventPayload.EMBEDDINGS: [image_embedding],
+                },
+            )
+        return image_embedding
+
+    def _get_image_embeddings(self, img_file_paths: List[ImageType]) -> List[Embedding]:
+        """
+        Embed the input sequence of image synchronously.
+
+        Subclasses can implement this method if batch queries are supported.
+        """
+        # Default implementation just loops over _get_image_embedding
+        return [
+            self._get_image_embedding(img_file_path) for img_file_path in img_file_paths
+        ]
+
+    async def _aget_image_embeddings(
+        self, img_file_paths: List[ImageType]
+    ) -> List[Embedding]:
+        """
+        Embed the input sequence of image asynchronously.
+
+        Subclasses can implement this method if batch queries are supported.
+        """
+        return await asyncio.gather(
+            *[
+                self._aget_image_embedding(img_file_path)
+                for img_file_path in img_file_paths
+            ]
+        )
+
+    def get_image_embedding_batch(
+        self, img_file_paths: List[ImageType], show_progress: bool = False
+    ) -> List[Embedding]:
+        """Get a list of image embeddings, with batching."""
+        cur_batch: List[ImageType] = []
+        result_embeddings: List[Embedding] = []
+
+        queue_with_progress = enumerate(
+            get_tqdm_iterable(
+                img_file_paths, show_progress, "Generating image embeddings"
+            )
+        )
+
+        for idx, img_file_path in queue_with_progress:
+            cur_batch.append(img_file_path)
+            if (
+                idx == len(img_file_paths) - 1
+                or len(cur_batch) == self.embed_batch_size
+            ):
+                # flush
+                with self.callback_manager.event(
+                    CBEventType.EMBEDDING,
+                    payload={EventPayload.SERIALIZED: self.to_dict()},
+                ) as event:
+                    embeddings = self._get_image_embeddings(cur_batch)
+                    result_embeddings.extend(embeddings)
+                    event.on_end(
+                        payload={
+                            EventPayload.CHUNKS: cur_batch,
+                            EventPayload.EMBEDDINGS: embeddings,
+                        },
+                    )
+                cur_batch = []
+
+        return result_embeddings
+
+    async def aget_image_embedding_batch(
+        self, img_file_paths: List[ImageType], show_progress: bool = False
+    ) -> List[Embedding]:
+        """Asynchronously get a list of image embeddings, with batching."""
+        cur_batch: List[ImageType] = []
+        callback_payloads: List[Tuple[str, List[ImageType]]] = []
+        result_embeddings: List[Embedding] = []
+        embeddings_coroutines: List[Coroutine] = []
+        for idx, img_file_path in enumerate(img_file_paths):
+            cur_batch.append(img_file_path)
+            if (
+                idx == len(img_file_paths) - 1
+                or len(cur_batch) == self.embed_batch_size
+            ):
+                # flush
+                event_id = self.callback_manager.on_event_start(
+                    CBEventType.EMBEDDING,
+                    payload={EventPayload.SERIALIZED: self.to_dict()},
+                )
+                callback_payloads.append((event_id, cur_batch))
+                embeddings_coroutines.append(self._aget_image_embeddings(cur_batch))
+                cur_batch = []
+
+        # flatten the results of asyncio.gather, which is a list of embeddings lists
+        nested_embeddings = []
+        if show_progress:
+            try:
+                from tqdm.asyncio import tqdm_asyncio
+
+                nested_embeddings = await tqdm_asyncio.gather(
+                    *embeddings_coroutines,
+                    total=len(embeddings_coroutines),
+                    desc="Generating embeddings",
+                )
+            except ImportError:
+                nested_embeddings = await asyncio.gather(*embeddings_coroutines)
+        else:
+            nested_embeddings = await asyncio.gather(*embeddings_coroutines)
+
+        result_embeddings = [
+            embedding for embeddings in nested_embeddings for embedding in embeddings
+        ]
+
+        for (event_id, image_batch), embeddings in zip(
+            callback_payloads, nested_embeddings
+        ):
+            self.callback_manager.on_event_end(
+                CBEventType.EMBEDDING,
+                payload={
+                    EventPayload.CHUNKS: image_batch,
+                    EventPayload.EMBEDDINGS: embeddings,
+                },
+                event_id=event_id,
+            )
+
+        return result_embeddings
+
+
+import fsspec
+import json
+import os
+from typing import Any, List, Dict, Tuple, Optional
+
+from llama_index.core.graph_stores.types import (
+    PropertyGraphStore,
+    ChunkNode,
+    EntityNode,
+    Triplet,
+    LabelledNode,
+    LabelledPropertyGraph,
+    Relation,
+    DEFAULT_PERSIST_DIR,
+    DEFUALT_PG_PERSIST_FNAME,
+)
+from llama_index.core.vector_stores.types import VectorStoreQuery
+
+
+class SimplePropertyGraphStore(PropertyGraphStore):
+    """Simple Labelled Property Graph Store.
+
+    This class implements a simple in-memory labelled property graph store.
+
+    Args:
+        graph (Optional[LabelledPropertyGraph]): Labelled property graph to initialize the store.
+    """
+
+    supports_structured_queries: bool = False
+    supports_vector_queries: bool = False
+
+    def __init__(
+        self,
+        graph: Optional[LabelledPropertyGraph] = None,
+    ) -> None:
+        self.graph = graph or LabelledPropertyGraph()
+
+    def get(
+        self,
+        properties: Optional[dict] = None,
+        ids: Optional[List[str]] = None,
+    ) -> List[LabelledNode]:
+        """Get nodes."""
+        nodes = list(self.graph.nodes.values())
+        if properties:
+            nodes = [
+                n
+                for n in nodes
+                if any(n.properties.get(k) == v for k, v in properties.items())
+            ]
+
+        # Filter by node_ids
+        if ids:
+            nodes = [n for n in nodes if n.id in ids]
+
+        return nodes
+
+    def get_triplets(
+        self,
+        entity_names: Optional[List[str]] = None,
+        relation_names: Optional[List[str]] = None,
+        properties: Optional[dict] = None,
+        ids: Optional[List[str]] = None,
+    ) -> List[Triplet]:
+        """Get triplets."""
+        # if nothing is passed, return empty list
+        if not ids and not properties and not entity_names and not relation_names:
+            return []
+
+        triplets = self.graph.get_triplets()
+        if entity_names:
+            triplets = [
+                t
+                for t in triplets
+                if t[0].id in entity_names or t[2].id in entity_names
+            ]
+
+        if relation_names:
+            triplets = [t for t in triplets if t[1].id in relation_names]
+
+        if properties:
+            triplets = [
+                t
+                for t in triplets
+                if any(
+                    t[0].properties.get(k) == v
+                    or t[1].properties.get(k) == v
+                    or t[2].properties.get(k) == v
+                    for k, v in properties.items()
+                )
+            ]
+
+        # Filter by node_ids
+        if ids:
+            triplets = [
+                t for t in triplets if any(t[0].id == i or t[2].id == i for i in ids)
+            ]
+
+        return triplets
+
+    def get_rel_map(
+        self,
+        graph_nodes: List[LabelledNode],
+        depth: int = 2,
+        limit: int = 30,
+        ignore_rels: Optional[List[str]] = None,
+    ) -> List[Triplet]:
+        """Get depth-aware rel map."""
+        triplets = []
+
+        cur_depth = 0
+        graph_triplets = self.get_triplets(ids=[gn.id for gn in graph_nodes])
+        seen_triplets = set()
+
+        while len(graph_triplets) > 0 and cur_depth < depth:
+            triplets.extend(graph_triplets)
+
+            # get next depth
+            graph_triplets = self.get_triplets(
+                entity_names=[t[2].id for t in graph_triplets]
+            )
+            graph_triplets = [t for t in graph_triplets if str(t) not in seen_triplets]
+            seen_triplets.update([str(t) for t in graph_triplets])
+            cur_depth += 1
+
+        ignore_rels = ignore_rels or []
+        triplets = [t for t in triplets if t[1].id not in ignore_rels]
+
+        return triplets[:limit]
+
+    def upsert_nodes(self, nodes: List[LabelledNode]) -> None:
+        """Add nodes."""
+        for node in nodes:
+            self.graph.add_node(node)
+
+    def upsert_relations(self, relations: List[Relation]) -> None:
+        """Add relations."""
+        for relation in relations:
+            self.graph.add_relation(relation)
+
+    def delete(
+        self,
+        entity_names: Optional[List[str]] = None,
+        relation_names: Optional[List[str]] = None,
+        properties: Optional[dict] = None,
+        ids: Optional[List[str]] = None,
+    ) -> None:
+        """Delete matching data."""
+        triplets = self.get_triplets(
+            entity_names=entity_names,
+            relation_names=relation_names,
+            properties=properties,
+            ids=ids,
+        )
+        for triplet in triplets:
+            self.graph.delete_triplet(triplet)
+
+        nodes = self.get(properties=properties, ids=ids)
+        for node in nodes:
+            self.graph.delete_node(node)
+
+    def persist(
+        self, persist_path: str, fs: Optional[fsspec.AbstractFileSystem] = None
+    ) -> None:
+        """Persist the graph store to a file."""
+        if fs is None:
+            fs = fsspec.filesystem("file")
+        with fs.open(persist_path, "w") as f:
+            f.write(self.graph.json())
+
+    @classmethod
+    def from_persist_path(
+        cls,
+        persist_path: str,
+        fs: Optional[fsspec.AbstractFileSystem] = None,
+    ) -> "SimplePropertyGraphStore":
+        """Load from persist path."""
+        if fs is None:
+            fs = fsspec.filesystem("file")
+
+        with fs.open(persist_path, "r") as f:
+            data = json.loads(f.read())
+
+        return cls.from_dict(data)
+
+    @classmethod
+    def from_persist_dir(
+        cls,
+        persist_dir: str = DEFAULT_PERSIST_DIR,
+        fs: Optional[fsspec.AbstractFileSystem] = None,
+    ) -> "SimplePropertyGraphStore":
+        """Load from persist dir."""
+        persist_path = os.path.join(persist_dir, DEFUALT_PG_PERSIST_FNAME)
+        return cls.from_persist_path(persist_path, fs=fs)
+
+    @classmethod
+    def from_dict(
+        cls,
+        data: dict,
+    ) -> "SimplePropertyGraphStore":
+        """Load from dict."""
+        # need to load nodes manually
+        node_dicts = data["nodes"]
+
+        kg_nodes = {}
+        for id, node_dict in node_dicts.items():
+            if "name" in node_dict:
+                kg_nodes[id] = EntityNode.parse_obj(node_dict)
+            elif "text" in node_dict:
+                kg_nodes[id] = ChunkNode.parse_obj(node_dict)
+            else:
+                raise ValueError(f"Could not infer node type for data: {node_dict!s}")
+
+        # clear the nodes, to load later
+        data["nodes"] = {}
+
+        # load the graph
+        graph = LabelledPropertyGraph.parse_obj(data)
+
+        # add the node back
+        graph.nodes = kg_nodes
+
+        return cls(graph)
+
+    def to_dict(self) -> dict:
+        """Convert to dict."""
+        return self.graph.dict()
+
+    # NOTE: Unimplemented methods for SimplePropertyGraphStore
+
+    def get_schema(self, refresh: bool = False) -> str:
+        """Get the schema of the graph store."""
+        raise NotImplementedError(
+            "Schema not implemented for SimplePropertyGraphStore."
+        )
+
+    def structured_query(
+        self, query: str, param_map: Optional[Dict[str, Any]] = None
+    ) -> Any:
+        """Query the graph store with statement and parameters."""
+        raise NotImplementedError(
+            "Structured query not implemented for SimplePropertyGraphStore."
+        )
+
+    def vector_query(
+        self, query: VectorStoreQuery, **kwargs: Any
+    ) -> Tuple[List[LabelledNode], List[float]]:
+        """Query the graph store with a vector store query."""
+        raise NotImplementedError(
+            "Vector query not implemented for SimplePropertyGraphStore."
+        )
+
+    @property
+    def client(self) -> Any:
+        """Get client."""
+        raise NotImplementedError(
+            "Client not implemented for SimplePropertyGraphStore."
+        )
+
+    def save_networkx_graph(self, name: str = "kg.html") -> None:
+        """Display the graph store, useful for debugging."""
+        import networkx as nx
+
+        G = nx.DiGraph()
+        for node in self.graph.nodes.values():
+            G.add_node(node.id, label=node.id)
+        for triplet in self.graph.triplets:
+            G.add_edge(triplet[0], triplet[2], label=triplet[1])
+
+        # save to html file
+        from pyvis.network import Network
+
+        net = Network(notebook=False, directed=True)
+        net.from_nx(G)
+        net.write_html(name)
+
+    def show_jupyter_graph(self) -> None:
+        """Visualizes the graph structure of the graph store.
+
+        NOTE: This function requires yfiles_jupyter_graphs to be installed.
+        NOTE: This method exclusively works in jupyter environments.
+
+        """
+        try:
+            from yfiles_jupyter_graphs import GraphWidget
+        except ImportError:
+            raise ImportError(
+                "Please install yfiles_jupyter_graphs to visualize the graph: `pip install yfiles_jupyter_graphs`"
+            )
+
+        w = GraphWidget()
+        nodes = []
+        edges = []
+        for node in self.graph.nodes.values():
+            node = {"id": node.id, "properties": {"label": node.id}}
+            nodes.append(node)
+        for triplet in self.graph.triplets:
+            edge = {
+                "id": triplet[1],
+                "start": triplet[0],
+                "end": triplet[2],
+                "properties": {"label": triplet[1]},
+            }
+            edges.append(edge)
+        w.nodes = nodes
+        w.edges = edges
+        display(w)
+
+import uuid
+from enum import Enum
+from pathlib import Path
+from typing import Any, Generic, Iterable, List, Optional, Type, TypeVar, cast
+
+from llama_index.core.bridge.pydantic import (
+    BaseModel,
+    Field,
+    GenericModel,
+    ValidationError,
+)
+from llama_index.core.readers.base import BasePydanticReader, ReaderConfig
+from llama_index.core.schema import BaseComponent, Document, TextNode
+
+
+class DataSource(BaseModel):
+    """
+    A class containing metadata for a type of data source.
+    """
+
+    name: str = Field(
+        description="Unique and human-readable name for the type of data source"
+    )
+    component_type: Type[BaseComponent] = Field(
+        description="Type of component that implements the data source"
+    )
+
+
+class DocumentGroup(BasePydanticReader):
+    """
+    A group of documents, usually separate pages from a single file.
+    """
+
+    file_path: str = Field(description="Path to the file containing the documents")
+    documents: List[Document] = Field(
+        description="Sequential group of documents, usually separate pages from a single file."
+    )
+
+    @property
+    def file_name(self) -> str:
+        return Path(self.file_path).name
+
+    @classmethod
+    def class_name(cls) -> str:
+        return "DocumentGroup"
+
+    def lazy_load_data(self, *args: Any, **load_kwargs: Any) -> Iterable[Document]:
+        """Load data from the input directory lazily."""
+        return self.documents
+
+
+def build_configurable_data_source_enum():
+    """
+    Build an enum of configurable data sources.
+    But conditional on if the corresponding reader is available.
+    """
+
+    class ConfigurableComponent(Enum):
+        @classmethod
+        def from_component(cls, component: BaseComponent) -> "ConfigurableDataSources":
+            component_class = type(component)
+            for component_type in cls:
+                if component_type.value.component_type == component_class:
+                    return component_type
+            raise ValueError(
+                f"Component {component} is not a supported data source component."
+            )
+
+        def build_configured_data_source(
+            self, component: BaseComponent, name: Optional[str] = None
+        ) -> "ConfiguredDataSource":
+            component_type = self.value.component_type
+            if not isinstance(component, component_type):
+                raise ValueError(
+                    f"The enum value {self} is not compatible with component of "
+                    f"type {type(component)}"
+                )
+            elif isinstance(component, BasePydanticReader):
+                reader_config = ReaderConfig(loader=component)
+                return ConfiguredDataSource[ReaderConfig](
+                    component=reader_config
+                )  # type: ignore
+
+            if isinstance(component, DocumentGroup) and name is None:
+                # if the component is a DocumentGroup, we want to use the
+                # full file path as the name of the data source
+                component = cast(DocumentGroup, component)
+                name = component.file_path
+
+            if name is None:
+                suffix = uuid.uuid1()
+                name = self.value.name + f" [{suffix}]]"
+            return ConfiguredDataSource[component_type](  # type: ignore
+                component=component, name=name
+            )
+
+    enum_members = []
+
+    try:
+        from llama_index.readers.discord import DiscordReader  # pants: no-infer-dep
+
+        enum_members.append(
+            (
+                "DISCORD",
+                DataSource(
+                    name="Discord",
+                    component_type=DiscordReader,
+                ),
+            )
+        )
+    except (ImportError, ValidationError):
+        pass
+
+    try:
+        from llama_index.readers.elasticsearch import (
+            ElasticsearchReader,
+        )  # pants: no-infer-dep
+
+        enum_members.append(
+            (
+                "ELASTICSEARCH",
+                DataSource(
+                    name="Elasticsearch",
+                    component_type=ElasticsearchReader,
+                ),
+            )
+        )
+    except (ImportError, ValidationError):
+        pass
+
+    try:
+        from llama_index.readers.notion import NotionPageReader  # pants: no-infer-dep
+
+        enum_members.append(
+            (
+                "NOTION_PAGE",
+                DataSource(
+                    name="Notion Page",
+                    component_type=NotionPageReader,
+                ),
+            )
+        )
+    except (ImportError, ValidationError):
+        pass
+
+    try:
+        from llama_index.readers.slack import SlackReader  # pants: no-infer-dep
+
+        enum_members.append(
+            (
+                "SLACK",
+                DataSource(
+                    name="Slack",
+                    component_type=SlackReader,
+                ),
+            )
+        )
+    except (ImportError, ValidationError):
+        pass
+
+    try:
+        from llama_index.readers.twitter import (
+            TwitterTweetReader,
+        )  # pants: no-infer-dep
+
+        enum_members.append(
+            (
+                "TWITTER",
+                DataSource(
+                    name="Twitter",
+                    component_type=TwitterTweetReader,
+                ),
+            )
+        )
+    except (ImportError, ValidationError):
+        pass
+
+    try:
+        from llama_index.readers.web import SimpleWebPageReader  # pants: no-infer-dep
+
+        enum_members.append(
+            (
+                "SIMPLE_WEB_PAGE",
+                DataSource(
+                    name="Simple Web Page",
+                    component_type=SimpleWebPageReader,
+                ),
+            )
+        )
+    except (ImportError, ValidationError):
+        pass
+
+    try:
+        from llama_index.readers.web import TrafilaturaWebReader  # pants: no-infer-dep
+
+        enum_members.append(
+            (
+                "TRAFILATURA_WEB_PAGE",
+                DataSource(
+                    name="Trafilatura Web Page",
+                    component_type=TrafilaturaWebReader,
+                ),
+            )
+        )
+    except (ImportError, ValidationError):
+        pass
+
+    try:
+        from llama_index.readers.web import (
+            BeautifulSoupWebReader,
+        )  # pants: no-infer-dep
+
+        enum_members.append(
+            (
+                "BEAUTIFUL_SOUP_WEB_PAGE",
+                DataSource(
+                    name="Beautiful Soup Web Page",
+                    component_type=BeautifulSoupWebReader,
+                ),
+            )
+        )
+    except (ImportError, ValidationError):
+        pass
+
+    try:
+        from llama_index.readers.web import RssReader  # pants: no-infer-dep
+
+        enum_members.append(
+            (
+                "RSS",
+                DataSource(
+                    name="RSS",
+                    component_type=RssReader,
+                ),
+            )
+        )
+    except (ImportError, ValidationError):
+        pass
+
+    try:
+        from llama_index.readers.wikipedia import WikipediaReader  # pants: no-infer-dep
+
+        enum_members.append(
+            (
+                "WIKIPEDIA",
+                DataSource(
+                    name="Wikipedia",
+                    component_type=WikipediaReader,
+                ),
+            )
+        )
+    except (ImportError, ValidationError):
+        pass
+
+    try:
+        from llama_index.readers.youtube_transcript import (
+            YoutubeTranscriptReader,
+        )  # pants: no-infer-dep
+
+        enum_members.append(
+            (
+                "YOUTUBE_TRANSCRIPT",
+                DataSource(
+                    name="Youtube Transcript",
+                    component_type=YoutubeTranscriptReader,
+                ),
+            )
+        )
+    except (ImportError, ValidationError):
+        pass
+
+    try:
+        from llama_index.readers.google import GoogleDocsReader  # pants: no-infer-dep
+
+        enum_members.append(
+            (
+                "GOOGLE_DOCS",
+                DataSource(
+                    name="Google Docs",
+                    component_type=GoogleDocsReader,
+                ),
+            )
+        )
+    except (ImportError, ValidationError):
+        pass
+
+    try:
+        from llama_index.readers.google import GoogleSheetsReader  # pants: no-infer-dep
+
+        enum_members.append(
+            (
+                "GOOGLE_SHEETS",
+                DataSource(
+                    name="Google Sheets",
+                    component_type=GoogleSheetsReader,
+                ),
+            )
+        )
+    except (ImportError, ValidationError):
+        pass
+
+    try:
+        from llama_index.readers.s3 import S3Reader  # pants: no-infer-dep
+
+        enum_members.append(
+            (
+                "S3",
+                DataSource(
+                    name="S3",
+                    component_type=S3Reader,
+                ),
+            )
+        )
+    except (ImportError, ValidationError):
+        pass
+
+    try:
+        from llama_index.readers.azstorage_blob import (
+            AzStorageBlobReader,
+        )  # pants: no-infer-dep
+
+        enum_members.append(
+            (
+                "AZURE_STORAGE_BLOB",
+                DataSource(
+                    name="Azure Storage Blob",
+                    component_type=AzStorageBlobReader,
+                ),
+            )
+        )
+    except (ImportError, ValidationError):
+        pass
+
+    try:
+        from llama_index.readers.gcs import GCSReader  # pants: no-infer-dep
+
+        enum_members.append(
+            (
+                "GCS",
+                DataSource(
+                    name="GCS",
+                    component_type=GCSReader,
+                ),
+            )
+        )
+    except (ImportError, ValidationError):
+        pass
+
+    try:
+        from llama_index.readers.google import GoogleDriveReader  # pants: no-infer-dep
+
+        enum_members.append(
+            (
+                "GOOGLE_DRIVE",
+                DataSource(
+                    name="Google Drive",
+                    component_type=GoogleDriveReader,
+                ),
+            )
+        )
+    except (ImportError, ValidationError):
+        pass
+
+    try:
+        from llama_index.readers.microsoft_onedrive import (
+            OneDriveReader,
+        )  # pants: no-infer-dep
+
+        enum_members.append(
+            (
+                "MICROSOFT_ONEDRIVE",
+                DataSource(
+                    name="Microsoft OneDrive",
+                    component_type=OneDriveReader,
+                ),
+            )
+        )
+    except (ImportError, ValidationError):
+        pass
+
+    try:
+        from llama_index.readers.microsoft_sharepoint import (
+            SharePointReader,
+        )  # pants: no-infer-dep
+
+        enum_members.append(
+            (
+                "MICROSOFT_SHAREPOINT",
+                DataSource(
+                    name="Microsoft Sharepoint",
+                    component_type=SharePointReader,
+                ),
+            )
+        )
+    except (ImportError, ValidationError):
+        pass
+
+    enum_members.append(
+        (
+            "READER",
+            DataSource(
+                name="Reader",
+                component_type=ReaderConfig,
+            ),
+        )
+    )
+
+    enum_members.append(
+        (
+            "DOCUMENT_GROUP",
+            DataSource(
+                name="Document Group",
+                component_type=DocumentGroup,
+            ),
+        )
+    )
+
+    enum_members.append(
+        (
+            "TEXT_NODE",
+            DataSource(
+                name="Text Node",
+                component_type=TextNode,
+            ),
+        )
+    )
+
+    enum_members.append(
+        (
+            "DOCUMENT",
+            DataSource(
+                name="Document",
+                component_type=Document,
+            ),
+        )
+    )
+
+    return ConfigurableComponent("ConfigurableDataSources", enum_members)
+
+
+ConfigurableDataSources = build_configurable_data_source_enum()
+
+T = TypeVar("T", bound=BaseComponent)
+
+
+class ConfiguredDataSource(GenericModel, Generic[T]):
+    """
+    A class containing metadata & implementation for a data source in a pipeline.
+    """
+
+    name: str
+    component: T = Field(description="Component that implements the data source")
+
+    @classmethod
+    def from_component(
+        cls, component: BaseComponent, name: Optional[str] = None
+    ) -> "ConfiguredDataSource":
+        """
+        Build a ConfiguredDataSource from a component.
+
+        This should be the preferred way to build a ConfiguredDataSource
+        as it will ensure that the component is supported as indicated by having a
+        corresponding enum value in DataSources.
+
+        This has the added bonus that you don't need to specify the generic type
+        like ConfiguredDataSource[Document]. The return value of
+        this ConfiguredDataSource.from_component(document) will be
+        ConfiguredDataSource[Document] if document is
+        a Document object.
+        """
+        return ConfigurableDataSources.from_component(
+            component
+        ).build_configured_data_source(component, name)
+
+    @property
+    def configurable_data_source_type(self) -> ConfigurableDataSources:
+        return ConfigurableDataSources.from_component(self.component)
+
+
+import builtins
+
+import numpy as np
+import optree
+import tensorflow as tf
+from tensorflow.compiler.tf2xla.python.xla import dynamic_update_slice
+
+from keras.src import tree
+from keras.src.backend.common import KerasVariable
+from keras.src.backend.common import global_state
+from keras.src.backend.common import standardize_dtype
+from keras.src.backend.common.backend_utils import slice_along_axis
+from keras.src.backend.common.keras_tensor import KerasTensor
+from keras.src.backend.common.name_scope import name_scope as base_name_scope
+from keras.src.backend.common.stateless_scope import StatelessScope
+from keras.src.backend.common.stateless_scope import in_stateless_scope
+from keras.src.backend.tensorflow.sparse import sparse_to_dense
+from keras.src.utils.naming import auto_name
+
+SUPPORTS_SPARSE_TENSORS = True
+
+
+class Variable(
+    KerasVariable,
+    tf.__internal__.types.Tensor,
+    tf.__internal__.tracking.Trackable,
+):
+    _should_act_as_resource_variable = True
+
+    @property
+    def handle(self):
+        return self.value.handle
+
+    def _initialize(self, value):
+        self._value = tf.Variable(
+            value, dtype=self._dtype, trainable=self.trainable, name=self.name
+        )
+
+    def _deferred_initialize(self):
+        if self._value is not None:
+            raise ValueError(f"Variable {self.path} is already initialized.")
+
+        if in_stateless_scope():
+            raise ValueError(
+                "You are attempting to initialize a variable "
+                "while in a stateless scope. This is disallowed. "
+                "Make sure that all variables are initialized "
+                "before you start using your layer/model objects."
+            )
+        with tf.init_scope():
+            value = self._initializer(self._shape, dtype=self._dtype)
+            self._initialize(value)
+
+    def _direct_assign(self, value):
+        self._value.assign(tf.cast(value, self._value.dtype))
+
+    def _convert_to_tensor(self, value, dtype=None):
+        return convert_to_tensor(value, dtype=dtype)
+
+    def numpy(self):  # noqa: F811
+        return self.value.numpy()
+
+    @property
+    def shape(self):
+        return tf.TensorShape(super().shape)
+
+    # Overload native accessor.
+    def __tf_tensor__(self, dtype=None, name=None):
+        return tf.convert_to_tensor(self.value, dtype=dtype, name=name)
+
+    # Methods below are for SavedModel support
+    @property
+    def _shared_name(self):
+        return self.value._shared_name
+
+    def _serialize_to_tensors(self):
+        try:
+            return self.value._serialize_to_tensors()
+        except NotImplementedError:
+            return {"VARIABLE_VALUE": self.value}
+
+    def _restore_from_tensors(self, restored_tensors):
+        try:
+            return self.value._restore_from_tensors(restored_tensors)
+        except NotImplementedError:
+            self.assign(restored_tensors["VARIABLE_VALUE"])
+            return self.value
+
+    def _copy_trackable_to_cpu(self, object_map):
+        self.value._copy_trackable_to_cpu(object_map)
+        object_map[self] = tf.Variable(object_map[self.value])
+
+    def _export_to_saved_model_graph(
+        self, object_map, tensor_map, options, **kwargs
+    ):
+        resource_list = self.value._export_to_saved_model_graph(
+            object_map, tensor_map, options, **kwargs
+        )
+        object_map[self] = tf.Variable(object_map[self.value])
+        return resource_list
+
+    def _write_object_proto(self, proto, options):
+        return self.value._write_object_proto(proto, options)
+
+
+def convert_to_tensor(x, dtype=None, sparse=None):
+    if isinstance(x, tf.SparseTensor) and sparse is not None and not sparse:
+        x = sparse_to_dense(x)
+    if dtype is not None:
+        dtype = standardize_dtype(dtype)
+    if not tf.is_tensor(x):
+        if dtype == "bool":
+            # TensorFlow boolean conversion is stricter than other backends.
+            # It does not allow ints. We convert without dtype and cast instead.
+            x = tf.convert_to_tensor(x)
+            return tf.cast(x, dtype)
+        return tf.convert_to_tensor(x, dtype=dtype)
+    elif dtype is not None and not x.dtype == dtype:
+        if isinstance(x, tf.SparseTensor):
+            x_shape = x.shape
+            x = tf.cast(x, dtype)
+            x.set_shape(x_shape)
+            return x
+        return tf.cast(x, dtype=dtype)
+    return x
+
+
+def convert_to_numpy(x):
+    if isinstance(x, tf.SparseTensor):
+        x = sparse_to_dense(x)
+    elif isinstance(x, tf.IndexedSlices):
+        x = tf.convert_to_tensor(x)
+    elif isinstance(x, tf.RaggedTensor):
+        x = x.to_tensor()
+    return np.array(x)
+
+
+def is_tensor(x):
+    return tf.is_tensor(x)
+
+
+def shape(x):
+    """Always return a tuple shape.
+
+    `tf.shape` will return a `tf.Tensor`, which differs from the tuple return
+    type on the torch and jax backends. We write our own method instead which
+    always returns a tuple, with integer values when the shape is known, and
+    tensor values when the shape is unknown (this is tf specific, as dynamic
+    shapes do not apply in other backends).
+    """
+    if isinstance(x, KerasTensor):
+        return x.shape
+    if not tf.is_tensor(x):
+        x = tf.convert_to_tensor(x)
+    if x.shape == tf.TensorShape(None):
+        raise ValueError(
+            "All tensors passed to `ops.shape` must have a statically known "
+            f"rank. Received: x={x} with unknown rank."
+        )
+    shape = x.shape.as_list()
+    dynamic = tf.shape(x)
+    for i in range(len(shape)):
+        if shape[i] is None:
+            try:
+                shape[i] = dynamic[i]
+            except:
+                # With RaggedTensors, accessing a ragged dimension will fail,
+                # we leave it as None.
+                pass
+    return tuple(shape)
+
+
+def cast(x, dtype):
+    dtype = standardize_dtype(dtype)
+    if isinstance(x, tf.SparseTensor):
+        x_shape = x.shape
+        x = tf.cast(x, dtype)
+        x.set_shape(x_shape)
+        return x
+    else:
+        return tf.cast(x, dtype=dtype)
+
+
+def compute_output_spec(fn, *args, **kwargs):
+    with StatelessScope():
+        graph_name = auto_name("scratch_graph")
+        with tf.__internal__.FuncGraph(graph_name).as_default():
+
+            def convert_keras_tensor_to_tf(x):
+                if isinstance(x, KerasTensor):
+                    if x.sparse:
+                        return tf.compat.v1.sparse_placeholder(
+                            shape=x.shape, dtype=x.dtype
+                        )
+                    else:
+                        return tf.compat.v1.placeholder(
+                            shape=x.shape, dtype=x.dtype
+                        )
+                return x
+
+            args, kwargs = tree.map_structure(
+                convert_keras_tensor_to_tf, (args, kwargs)
+            )
+            tf_out = fn(*args, **kwargs)
+
+            def convert_tf_to_keras_tensor(x):
+                if tf.is_tensor(x):
+                    return KerasTensor(
+                        x.shape, x.dtype, sparse=isinstance(x, tf.SparseTensor)
+                    )
+                return x
+
+            output_spec = tree.map_structure(convert_tf_to_keras_tensor, tf_out)
+    return output_spec
+
+
+def cond(pred, true_fn, false_fn):
+    return tf.cond(pred, true_fn=true_fn, false_fn=false_fn)
+
+
+def vectorized_map(function, elements):
+    return tf.vectorized_map(function, elements)
+
+
+def map(f, xs):
+    xs = tree.map_structure(convert_to_tensor, xs)
+
+    def get_fn_output_signature(x):
+        out = f(x)
+        return tree.map_structure(tf.TensorSpec.from_tensor, out)
+
+    fn_output_signature = get_fn_output_signature(xs[0])
+    return tf.map_fn(f, xs, fn_output_signature=fn_output_signature)
+
+
+def scan(f, init, xs=None, length=None, reverse=False, unroll=1):
+    # We have reimplemented `scan` to match the behavior of `jax.lax.scan`
+    # Ref: tf.scan, jax.lax.scan
+    if not callable(f):
+        raise TypeError(f"`f` should be a callable. Received: f={f}")
+    if not isinstance(unroll, bool):
+        if not isinstance(unroll, int) or unroll < 1:
+            raise ValueError(
+                "`unroll` must be an positive integer or boolean. "
+                f"Received: unroll={unroll}"
+            )
+    if xs is None and length is None:
+        raise ValueError("Got no `xs` to scan over and `length` not provided.")
+
+    input_is_sequence = tree.is_nested(xs)
+    output_is_sequence = tree.is_nested(init)
+
+    def pack_input(x):
+        return tree.pack_sequence_as(xs, x) if input_is_sequence else x[0]
+
+    def pack_output(x):
+        return tree.pack_sequence_as(init, x) if output_is_sequence else x[0]
+
+    if xs is None:
+        xs_flat = []
+        n = int(length)
+    else:
+        # xs_flat = flatten_input(xs)
+        xs_flat = tree.flatten(xs)
+        xs_flat = [tf.convert_to_tensor(elem) for elem in xs_flat]
+        n = int(length) if length is not None else tf.shape(xs_flat[0])[0]
+
+    # TensorArrays are always flat
+    xs_array = [
+        tf.TensorArray(
+            dtype=x.dtype,
+            size=n,
+            dynamic_size=False,
+            element_shape=x.shape[1:],
+            infer_shape=True,
+        )
+        for x in xs_flat
+    ]
+    xs_array = [x_a.unstack(x) for x_a, x in zip(xs_array, xs_flat)]
+
+    init_flat = tree.flatten(init)
+    carry_flat = [tf.convert_to_tensor(init) for init in init_flat]
+
+    # Store the intermediate values
+    # Note: there is a constraint that the output of `f` must have the same
+    # shape and dtype as carry (`init`).
+    ys_array = [
+        tf.TensorArray(
+            dtype=carry.dtype,
+            size=n,
+            dynamic_size=False,
+            element_shape=carry.shape,
+            infer_shape=True,
+        )
+        for carry in carry_flat
+    ]
+    carry_array = [
+        tf.TensorArray(
+            dtype=carry.dtype,
+            size=1,
+            dynamic_size=False,
+            clear_after_read=False,
+            element_shape=carry.shape,
+            infer_shape=True,
+        )
+        for carry in carry_flat
+    ]
+    carry_array = [
+        carry.write(0, c) for (carry, c) in zip(carry_array, carry_flat)
+    ]
+
+    def loop_body(i, carry_array, ys_array):
+        packed_xs = (
+            pack_input([xs.read(i) for xs in xs_array])
+            if len(xs_array) > 0
+            else None
+        )
+        packed_carry = pack_output([carry.read(0) for carry in carry_array])
+
+        carry, ys = f(packed_carry, packed_xs)
+
+        if ys is not None:
+            flat_ys = tree.flatten(ys)
+            ys_array = [ys.write(i, v) for (ys, v) in zip(ys_array, flat_ys)]
+        if carry is not None:
+            flat_carry = tree.flatten(carry)
+            carry_array = [
+                carry.write(0, v) for (carry, v) in zip(carry_array, flat_carry)
+            ]
+        next_i = i + 1 if not reverse else i - 1
+        return (next_i, carry_array, ys_array)
+
+    if isinstance(unroll, bool):
+        unroll = max(n, 1) if unroll else 1
+
+    _, carry_array, ys_array = tf.while_loop(
+        lambda i, _1, _2: i >= 0 if reverse else i < n,
+        loop_body,
+        (n - 1 if reverse else 0, carry_array, ys_array),
+        parallel_iterations=unroll,
+    )
+
+    ys_flat = [ys.stack() for ys in ys_array]
+    carry_flat = [carry.read(0) for carry in carry_array]
+    if xs is not None:
+        n_static = xs_flat[0].get_shape().with_rank_at_least(1)[0]
+        if not isinstance(n_static, int):
+            for x in xs_flat[1:]:
+                n_static.assert_is_compatible_with(
+                    x.get_shape().with_rank_at_least(1)[0]
+                )
+        for r in ys_flat:
+            r.set_shape(tf.TensorShape(n_static).concatenate(r.get_shape()[1:]))
+    return pack_output(carry_flat), pack_output(ys_flat)
+
+
+def associative_scan(f, elems, reverse=False, axis=0):
+    # Implementation is the same as tfp.math.scan_associative
+    # with additional checks to ensure similar behavior with jax
+    if not callable(f):
+        raise TypeError(f"`f` should be a callable. Received: f={f}")
+    elems_flat, treespec = optree.tree_flatten(elems)
+    elems_flat = [tf.convert_to_tensor(elem) for elem in elems_flat]
+    if reverse:
+        elems_flat = [tf.reverse(elem, [axis]) for elem in elems_flat]
+
+    def _combine(a_flat, b_flat):
+        a = optree.tree_unflatten(treespec, a_flat)
+        b = optree.tree_unflatten(treespec, b_flat)
+        c = f(a, b)
+        c_flat, _ = optree.tree_flatten(c)
+        return c_flat
+
+    def _get_dim(x):
+        return shape(x)[axis]
+
+    # TODO add constant dim check
+    num_elems = _get_dim(elems_flat[0])
+    if not all(_get_dim(elem) == num_elems for elem in elems_flat[1:]):
+        raise ValueError(
+            "Array inputs to associative_scan must have the same "
+            "first dimension. (saw: {})".format(
+                [tf.shape(elem) for elem in elems_flat]
+            )
+        )
+
+    def _interleave(a, b, axis):
+        # [a b c ...] [d e f ...] -> [a d b e c f ...]
+        num_elems_a = _get_dim(a)
+        num_elems_b = _get_dim(b)
+
+        # Note that interleaving implies rank(a)==rank(b).
+        axis = tf.where(axis >= 0, axis, tf.rank(a) + axis)
+        axis = (
+            int(axis)  # Avoid ndarray values.
+            if tf.get_static_value(axis) is not None
+            else axis
+        )
+
+        def _interleave_with_b(a):
+            return tf.reshape(
+                # Work around lack of support for Tensor axes in
+                # `tf.stack` by using `concat` and `expand_dims` instead.
+                tf.concat(
+                    [
+                        tf.expand_dims(a, axis=axis + 1),
+                        tf.expand_dims(b, axis=axis + 1),
+                    ],
+                    axis=axis + 1,
+                ),
+                tf.concat(
+                    [
+                        a.get_shape()[:axis],
+                        [2 * num_elems_b],
+                        a.get_shape()[axis + 1 :],
+                    ],
+                    axis=0,
+                ),
+            )
+
+        return tf.cond(
+            tf.equal(num_elems_a, num_elems_b + 1),
+            lambda: tf.concat(
+                [
+                    _interleave_with_b(
+                        slice_along_axis(a, None, -1, axis=axis)
+                    ),
+                    slice_along_axis(a, -1, None, axis=axis),
+                ],
+                axis=axis,
+            ),
+            lambda: _interleave_with_b(a),
+        )
+
+    def _scan(elems):
+        elem_length = _get_dim(elems[0])
+        a = [slice_along_axis(elem, 0, -1, step=2, axis=axis) for elem in elems]
+        b = [
+            slice_along_axis(elem, 1, None, step=2, axis=axis) for elem in elems
+        ]
+        reduced_elems = _combine(a, b)
+
+        def _handle_base_case_elem_length_two():
+            return [
+                tf.concat(
+                    [slice_along_axis(elem, 0, 1, axis=axis), reduced_elem],
+                    axis=axis,
+                )
+                for (reduced_elem, elem) in zip(reduced_elems, elems)
+            ]
+
+        def _handle_base_case_elem_length_three():
+            reduced_reduced_elems = _combine(
+                reduced_elems,
+                [slice_along_axis(elem, 2, 3, axis=axis) for elem in elems],
+            )
+            return [
+                tf.concat(
+                    [
+                        slice_along_axis(elem, 0, 1, axis=axis),
+                        reduced_elem,
+                        reduced_reduced_elem,
+                    ],
+                    axis=axis,
+                )
+                for (reduced_reduced_elem, reduced_elem, elem) in zip(
+                    reduced_reduced_elems, reduced_elems, elems
+                )
+            ]
+
+        at_base_case = tf.logical_or(
+            tf.equal(elem_length, 2), tf.equal(elem_length, 3)
+        )
+
+        def _base_case():
+            return tf.cond(
+                tf.equal(elem_length, 2),
+                _handle_base_case_elem_length_two,
+                _handle_base_case_elem_length_three,
+            )
+
+        def _recursive_case():
+
+            odd_elems = _scan(reduced_elems)
+
+            def _even_length_case():
+                return _combine(
+                    [
+                        slice_along_axis(odd_elem, 0, -1, axis=axis)
+                        for odd_elem in odd_elems
+                    ],
+                    [
+                        slice_along_axis(elem, 2, None, 2, axis=axis)
+                        for elem in elems
+                    ],
+                )
+
+            def _odd_length_case():
+                return _combine(
+                    [odd_elem for odd_elem in odd_elems],
+                    [
+                        slice_along_axis(elem, 2, None, 2, axis=axis)
+                        for elem in elems
+                    ],
+                )
+
+            results = tf.cond(
+                tf.equal(elem_length % 2, 0),
+                _even_length_case,
+                _odd_length_case,
+            )
+
+            even_elems = [
+                tf.concat(
+                    [slice_along_axis(elem, 0, 1, axis=axis), result], axis=axis
+                )
+                for (elem, result) in zip(elems, results)
+            ]
+            return list(
+                builtins.map(
+                    lambda a, b: _interleave(a, b, axis=axis),
+                    even_elems,
+                    odd_elems,
+                )
+            )
+
+        return tf.cond(at_base_case, _base_case, _recursive_case)
+
+    scans = _scan(elems_flat)
+    if reverse:
+        scans = [tf.reverse(scanned, [axis]) for scanned in scans]
+
+    return optree.tree_unflatten(treespec, scans)
+
+
+def scatter(indices, values, shape):
+    return tf.scatter_nd(indices, values, shape)
+
+
+def scatter_update(inputs, indices, updates):
+    return tf.tensor_scatter_nd_update(inputs, indices, updates)
+
+
+def slice(inputs, start_indices, shape):
+    return tf.slice(inputs, start_indices, shape)
+
+
+def slice_update(inputs, start_indices, updates):
+    return dynamic_update_slice(inputs, updates, start_indices)
+
+
+def switch(index, branches, *operands):
+    index = convert_to_tensor(index, "int32")
+    index = tf.clip_by_value(index, 0, len(branches) - 1)
+
+    # Workaround to deal with python closures. More details:
+    # https://github.com/tensorflow/tensorflow/issues/8776#issuecomment-311383887
+    def gen_fn(i):
+        return lambda: branches[i](*operands)
+
+    branch_fns = [gen_fn(i) for i in range(len(branches))]
+    return tf.switch_case(index, branch_fns)
+
+
+def while_loop(
+    cond,
+    body,
+    loop_vars,
+    maximum_iterations=None,
+):
+    is_tuple = isinstance(loop_vars, (tuple, list))
+    loop_vars = tuple(loop_vars) if is_tuple else (loop_vars,)
+
+    def _body(*args):
+        outputs = body(*args)
+        return tuple(outputs) if is_tuple else (outputs,)
+
+    outputs = tf.while_loop(
+        cond,
+        _body,
+        loop_vars,
+        maximum_iterations=maximum_iterations,
+    )
+    return outputs if is_tuple else outputs[0]
+
+
+def fori_loop(lower, upper, body_fun, init_val):
+    return tf.while_loop(
+        lambda i, val: i < upper,
+        lambda i, val: (i + 1, body_fun(i, val)),
+        (lower, init_val),
+    )[1]
+
+
+def stop_gradient(variable):
+    return tf.stop_gradient(variable)
+
+
+def unstack(x, num=None, axis=0):
+    return tf.unstack(x, num=num, axis=axis)
+
+
+def random_seed_dtype():
+    # tensorflow random operation only works on int32/int64, not uint32.
+    return "int64"
+
+
+def custom_gradient(fun):
+    return tf.custom_gradient(f=fun)
+
+
+class name_scope(base_name_scope):
+    def __init__(self, name, **kwargs):
+        super().__init__(name, **kwargs)
+        self._tf_name_scope = tf.name_scope(name)
+
+    def __enter__(self):
+        name_scope_stack = global_state.get_global_attribute(
+            "name_scope_stack", default=[], set_to_default=True
+        )
+        if self.deduplicate and name_scope_stack:
+            parent_caller = name_scope_stack[-1].caller
+            parent_name = name_scope_stack[-1].name
+            if (
+                self.caller is not None
+                and self.caller is parent_caller
+                and self.name == parent_name
+            ):
+                return self
+        name_scope_stack.append(self)
+        self._pop_on_exit = True
+        self._tf_name_scope.__enter__()
+        return self
+
+    def __exit__(self, *args, **kwargs):
+        super().__exit__(*args, **kwargs)
+        if self._pop_on_exit:
+            self._tf_name_scope.__exit__(*args, **kwargs)
+
+
+def device_scope(device_name):
+    return tf.device(device_name)
+
+
+"""Keras base class for convolution layers."""
+
+from keras.src import activations
+from keras.src import constraints
+from keras.src import initializers
+from keras.src import ops
+from keras.src import regularizers
+from keras.src.backend import standardize_data_format
+from keras.src.layers.input_spec import InputSpec
+from keras.src.layers.layer import Layer
+from keras.src.ops.operation_utils import compute_conv_output_shape
+from keras.src.utils.argument_validation import standardize_padding
+from keras.src.utils.argument_validation import standardize_tuple
+
+
+class BaseConv(Layer):
+    """Abstract N-D convolution layer (private, used as implementation base).
+
+    This layer creates a convolution kernel that is convolved (actually
+    cross-correlated) with the layer input to produce a tensor of outputs. If
+    `use_bias` is True (and a `bias_initializer` is provided), a bias vector is
+    created and added to the outputs. Finally, if `activation` is not `None`, it
+    is applied to the outputs as well.
+
+    Note: layer attributes cannot be modified after the layer has been called
+    once (except the `trainable` attribute).
+
+    Args:
+        rank: int, the rank of the convolution, e.g. 2 for 2D convolution.
+        filters: int, the dimension of the output space (the number of filters
+            in the convolution).
+        kernel_size: int or tuple/list of `rank` integers, specifying the size
+            of the convolution window.
+        strides: int or tuple/list of `rank` integers, specifying the stride
+            length of the convolution. If only one int is specified, the same
+            stride size will be used for all dimensions. `strides > 1` is
+            incompatible with `dilation_rate > 1`.
+        padding: string, either `"valid"` or `"same"` (case-insensitive).
+            `"valid"` means no padding. `"same"` results in padding evenly to
+            the left/right or up/down of the input. When `padding="same"` and
+            `strides=1`, the output has the same size as the input.
+        data_format: string, either `"channels_last"` or `"channels_first"`.
+            The ordering of the dimensions in the inputs. `"channels_last"`
+            corresponds to inputs with shape `(batch, steps, features)`
+            while `"channels_first"` corresponds to inputs with shape
+            `(batch, features, steps)`. It defaults to the `image_data_format`
+            value found in your Keras config file at `~/.keras/keras.json`.
+            If you never set it, then it will be `"channels_last"`.
+        dilation_rate: int or tuple/list of `rank` integers, specifying the
+            dilation rate to use for dilated convolution. If only one int is
+            specified, the same dilation rate will be used for all dimensions.
+        groups: A positive int specifying the number of groups in which the
+            input is split along the channel axis. Each group is convolved
+            separately with `filters // groups` filters. The output is the
+            concatenation of all the `groups` results along the channel axis.
+            Input channels and `filters` must both be divisible by `groups`.
+        activation: Activation function. If `None`, no activation is applied.
+        use_bias: bool, if `True`, bias will be added to the output.
+        kernel_initializer: Initializer for the convolution kernel. If `None`,
+            the default initializer (`"glorot_uniform"`) will be used.
+        bias_initializer: Initializer for the bias vector. If `None`, the
+            default initializer (`"zeros"`) will be used.
+        kernel_regularizer: Optional regularizer for the convolution kernel.
+        bias_regularizer: Optional regularizer for the bias vector.
+        activity_regularizer: Optional regularizer function for the output.
+        kernel_constraint: Optional projection function to be applied to the
+            kernel after being updated by an `Optimizer` (e.g. used to implement
+            norm constraints or value constraints for layer weights). The
+            function must take as input the unprojected variable and must return
+            the projected variable (which must have the same shape). Constraints
+            are not safe to use when doing asynchronous distributed training.
+        bias_constraint: Optional projection function to be applied to the
+            bias after being updated by an `Optimizer`.
+        lora_rank: Optional integer. If set, the layer's forward pass
+            will implement LoRA (Low-Rank Adaptation)
+            with the provided rank. LoRA sets the layer's kernel
+            to non-trainable and replaces it with a delta over the
+            original kernel, obtained via multiplying two lower-rank
+            trainable matrices. This can be useful to reduce the
+            computation cost of fine-tuning large dense layers.
+            You can also enable LoRA on an existing layer by calling
+            `layer.enable_lora(rank)`.
+    """
+
+    def __init__(
+        self,
+        rank,
+        filters,
+        kernel_size,
+        strides=1,
+        padding="valid",
+        data_format=None,
+        dilation_rate=1,
+        groups=1,
+        activation=None,
+        use_bias=True,
+        kernel_initializer="glorot_uniform",
+        bias_initializer="zeros",
+        kernel_regularizer=None,
+        bias_regularizer=None,
+        activity_regularizer=None,
+        kernel_constraint=None,
+        bias_constraint=None,
+        lora_rank=None,
+        **kwargs,
+    ):
+        super().__init__(activity_regularizer=activity_regularizer, **kwargs)
+        self.rank = rank
+        self.filters = filters
+        self.groups = groups
+        self.kernel_size = standardize_tuple(kernel_size, rank, "kernel_size")
+        self.strides = standardize_tuple(strides, rank, "strides")
+        self.dilation_rate = standardize_tuple(
+            dilation_rate, rank, "dilation_rate"
+        )
+        self.padding = standardize_padding(padding, allow_causal=rank == 1)
+        self.data_format = standardize_data_format(data_format)
+        self.activation = activations.get(activation)
+        self.use_bias = use_bias
+        self.kernel_initializer = initializers.get(kernel_initializer)
+        self.bias_initializer = initializers.get(bias_initializer)
+        self.kernel_regularizer = regularizers.get(kernel_regularizer)
+        self.bias_regularizer = regularizers.get(bias_regularizer)
+        self.kernel_constraint = constraints.get(kernel_constraint)
+        self.bias_constraint = constraints.get(bias_constraint)
+        self.lora_rank = lora_rank
+        self.lora_enabled = False
+        self.input_spec = InputSpec(min_ndim=self.rank + 2)
+        self.data_format = self.data_format
+
+        if self.filters is not None and self.filters <= 0:
+            raise ValueError(
+                "Invalid value for argument `filters`. Expected a strictly "
+                f"positive value. Received filters={self.filters}."
+            )
+
+        if self.groups <= 0:
+            raise ValueError(
+                "The number of groups must be a positive integer. "
+                f"Received: groups={self.groups}."
+            )
+
+        if self.filters is not None and self.filters % self.groups != 0:
+            raise ValueError(
+                "The number of filters must be evenly divisible by the "
+                f"number of groups. Received: groups={self.groups}, "
+                f"filters={self.filters}."
+            )
+
+        if not all(self.kernel_size):
+            raise ValueError(
+                "The argument `kernel_size` cannot contain 0. Received "
+                f"kernel_size={self.kernel_size}."
+            )
+
+        if not all(self.strides):
+            raise ValueError(
+                "The argument `strides` cannot contains 0. Received "
+                f"strides={self.strides}"
+            )
+
+        if max(self.strides) > 1 and max(self.dilation_rate) > 1:
+            raise ValueError(
+                "`strides > 1` not supported in conjunction with "
+                f"`dilation_rate > 1`. Received: strides={self.strides} and "
+                f"dilation_rate={self.dilation_rate}"
+            )
+
+    def build(self, input_shape):
+        if self.data_format == "channels_last":
+            channel_axis = -1
+            input_channel = input_shape[-1]
+        else:
+            channel_axis = 1
+            input_channel = input_shape[1]
+        self.input_spec = InputSpec(
+            min_ndim=self.rank + 2, axes={channel_axis: input_channel}
+        )
+        if input_channel % self.groups != 0:
+            raise ValueError(
+                "The number of input channels must be evenly divisible by "
+                f"the number of groups. Received groups={self.groups}, but the "
+                f"input has {input_channel} channels (full input shape is "
+                f"{input_shape})."
+            )
+        kernel_shape = self.kernel_size + (
+            input_channel // self.groups,
+            self.filters,
+        )
+
+        # compute_output_shape contains some validation logic for the input
+        # shape, and make sure the output shape has all positive dimensions.
+        self.compute_output_shape(input_shape)
+
+        self._kernel = self.add_weight(
+            name="kernel",
+            shape=kernel_shape,
+            initializer=self.kernel_initializer,
+            regularizer=self.kernel_regularizer,
+            constraint=self.kernel_constraint,
+            trainable=True,
+            dtype=self.dtype,
+        )
+        if self.use_bias:
+            self.bias = self.add_weight(
+                name="bias",
+                shape=(self.filters,),
+                initializer=self.bias_initializer,
+                regularizer=self.bias_regularizer,
+                constraint=self.bias_constraint,
+                trainable=True,
+                dtype=self.dtype,
+            )
+        else:
+            self.bias = None
+        self.built = True
+        if self.lora_rank:
+            self.enable_lora(self.lora_rank)
+
+    @property
+    def kernel(self):
+        if not self.built:
+            raise AttributeError(
+                "You must build the layer before accessing `kernel`."
+            )
+        if self.lora_enabled:
+            return self._kernel + ops.matmul(
+                self.lora_kernel_a, self.lora_kernel_b
+            )
+        return self._kernel
+
+    def convolution_op(self, inputs, kernel):
+        return ops.conv(
+            inputs,
+            kernel,
+            strides=list(self.strides),
+            padding=self.padding,
+            dilation_rate=self.dilation_rate,
+            data_format=self.data_format,
+        )
+
+    def call(self, inputs):
+        outputs = self.convolution_op(
+            inputs,
+            self.kernel,
+        )
+        if self.use_bias:
+            if self.data_format == "channels_last":
+                bias_shape = (1,) * (self.rank + 1) + (self.filters,)
+            else:
+                bias_shape = (1, self.filters) + (1,) * self.rank
+            bias = ops.reshape(self.bias, bias_shape)
+            outputs += bias
+
+        if self.activation is not None:
+            return self.activation(outputs)
+        return outputs
+
+    def compute_output_shape(self, input_shape):
+        return compute_conv_output_shape(
+            input_shape,
+            self.filters,
+            self.kernel_size,
+            strides=self.strides,
+            padding=self.padding,
+            data_format=self.data_format,
+            dilation_rate=self.dilation_rate,
+        )
+
+    def enable_lora(
+        self, rank, a_initializer="he_uniform", b_initializer="zeros"
+    ):
+        if self.kernel_constraint:
+            raise ValueError(
+                "Lora is incompatible with kernel constraints. "
+                "In order to enable lora on this layer, remove the "
+                "`kernel_constraint` argument."
+            )
+        if not self.built:
+            raise ValueError(
+                "Cannot enable lora on a layer that isn't yet built."
+            )
+        if self.lora_enabled:
+            raise ValueError(
+                "lora is already enabled. "
+                "This can only be done once per layer."
+            )
+        self._tracker.unlock()
+        self.lora_kernel_a = self.add_weight(
+            name="lora_kernel_a",
+            shape=self._kernel.shape[:-1] + (rank,),
+            initializer=initializers.get(a_initializer),
+            regularizer=self.kernel_regularizer,
+        )
+        self.lora_kernel_b = self.add_weight(
+            name="lora_kernel_b",
+            shape=(rank, self.filters),
+            initializer=initializers.get(b_initializer),
+            regularizer=self.kernel_regularizer,
+        )
+        self._kernel.trainable = False
+        self._tracker.lock()
+        self.lora_enabled = True
+        self.lora_rank = rank
+
+    def save_own_variables(self, store):
+        # Do nothing if the layer isn't yet built
+        if not self.built:
+            return
+        target_variables = [self.kernel]
+        if self.use_bias:
+            target_variables.append(self.bias)
+        for i, variable in enumerate(target_variables):
+            store[str(i)] = variable
+
+    def load_own_variables(self, store):
+        if not self.lora_enabled:
+            self._check_load_own_variables(store)
+        # Do nothing if the layer isn't yet built
+        if not self.built:
+            return
+        target_variables = [self._kernel]
+        if self.use_bias:
+            target_variables.append(self.bias)
+        for i, variable in enumerate(target_variables):
+            variable.assign(store[str(i)])
+        if self.lora_enabled:
+            self.lora_kernel_a.assign(ops.zeros(self.lora_kernel_a.shape))
+            self.lora_kernel_b.assign(ops.zeros(self.lora_kernel_b.shape))
+
+    def get_config(self):
+        config = super().get_config()
+        config.update(
+            {
+                "filters": self.filters,
+                "kernel_size": self.kernel_size,
+                "strides": self.strides,
+                "padding": self.padding,
+                "data_format": self.data_format,
+                "dilation_rate": self.dilation_rate,
+                "groups": self.groups,
+                "activation": activations.serialize(self.activation),
+                "use_bias": self.use_bias,
+                "kernel_initializer": initializers.serialize(
+                    self.kernel_initializer
+                ),
+                "bias_initializer": initializers.serialize(
+                    self.bias_initializer
+                ),
+                "kernel_regularizer": regularizers.serialize(
+                    self.kernel_regularizer
+                ),
+                "bias_regularizer": regularizers.serialize(
+                    self.bias_regularizer
+                ),
+                "activity_regularizer": regularizers.serialize(
+                    self.activity_regularizer
+                ),
+                "kernel_constraint": constraints.serialize(
+                    self.kernel_constraint
+                ),
+                "bias_constraint": constraints.serialize(self.bias_constraint),
+            }
+        )
+        if self.lora_rank:
+            config["lora_rank"] = self.lora_rank
+        return config
+
+    def _check_load_own_variables(self, store):
+        all_vars = self._trainable_variables + self._non_trainable_variables
+        if len(store.keys()) != len(all_vars):
+            if len(all_vars) == 0 and not self.built:
+                raise ValueError(
+                    f"Layer '{self.name}' was never built "
+                    "and thus it doesn't have any variables. "
+                    f"However the weights file lists {len(store.keys())} "
+                    "variables for this layer.\n"
+                    "In most cases, this error indicates that either:\n\n"
+                    "1. The layer is owned by a parent layer that "
+                    "implements a `build()` method, but calling the "
+                    "parent's `build()` method did NOT create the state of "
+                    f"the child layer '{self.name}'. A `build()` method "
+                    "must create ALL state for the layer, including "
+                    "the state of any children layers.\n\n"
+                    "2. You need to implement "
+                    "the `def build_from_config(self, config)` method "
+                    f"on layer '{self.name}', to specify how to rebuild "
+                    "it during loading. "
+                    "In this case, you might also want to implement the "
+                    "method that generates the build config at saving time, "
+                    "`def get_build_config(self)`. "
+                    "The method `build_from_config()` is meant "
+                    "to create the state "
+                    "of the layer (i.e. its variables) upon deserialization.",
+                )
+            raise ValueError(
+                f"Layer '{self.name}' expected {len(all_vars)} variables, "
+                "but received "
+                f"{len(store.keys())} variables during loading. "
+                f"Expected: {[v.name for v in all_vars]}"
+            )
